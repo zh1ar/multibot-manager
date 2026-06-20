@@ -185,16 +185,36 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "mb_admins":
         admins = db.get("global_admins", [])
-        text = "👑 ادمین‌های سراسری:\n\n" + "\n".join(f"• `{a}`" for a in admins)
-        rows = [
-            [InlineKeyboardButton("➕ افزودن ادمین", callback_data="mb_addadmin")],
-            [InlineKeyboardButton("🔙 برگشت", callback_data="mb_back")],
-        ]
+        text = "👑 ادمین‌های سراسری:\n\nبرای حذف یه ادمین، روی دکمه‌ش بزن."
+        rows = [[InlineKeyboardButton(f"❌ {a}", callback_data=f"mb_deladmin_{a}")] for a in admins]
+        rows.append([InlineKeyboardButton("➕ افزودن ادمین", callback_data="mb_addadmin")])
+        rows.append([InlineKeyboardButton("🔙 برگشت", callback_data="mb_back")])
         await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(rows)); return
 
     if data == "mb_addadmin":
         context.user_data["awaiting"] = "add_admin"
         await q.edit_message_text("آیدی عددی ادمین جدید رو بفرست:", reply_markup=back_kb("mb_admins")); return
+
+    if data.startswith("mb_deladmin_"):
+        uid = int(data[len("mb_deladmin_"):])
+        rows = [
+            [InlineKeyboardButton("✅ بله، حذف کن", callback_data=f"mb_deladminconfirm_{uid}")],
+            [InlineKeyboardButton("❌ انصراف", callback_data="mb_admins")],
+        ]
+        await q.edit_message_text(
+            f"⚠️ مطمئنی می‌خوای ادمین `{uid}` رو حذف کنی؟",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(rows)
+        ); return
+
+    if data.startswith("mb_deladminconfirm_"):
+        uid = int(data[len("mb_deladminconfirm_"):])
+        if uid == q.from_user.id:
+            await q.edit_message_text("⛔️ نمی‌تونی خودتو از ادمین‌ها حذف کنی.", reply_markup=back_kb("mb_admins")); return
+        with db_transaction() as db2:
+            if uid in db2["global_admins"]:
+                db2["global_admins"].remove(uid)
+        await q.edit_message_text(f"✅ ادمین `{uid}` حذف شد.", parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("mb_admins")); return
 
     # ─── انتخاب ربات مقصد برای آپلود فایل ───
     if data.startswith("upload_to_"):
