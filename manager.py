@@ -118,14 +118,20 @@ async def _do_send_post(q_or_msg, context, is_message=False):
             await q_or_msg.edit_message_text(txt)
         return
 
-    template = bd.get("channel2_template", "{caption}\n\n📁 {name}")
+    # قالب ثابت (footer) - متغیرها: {name}, {link}
+    template = bd.get("channel2_template", "📁 {name}")
     btn_text = bd.get("channel2_btn_text", "📥 دریافت فایل")
-    caption_val = flow.get("caption", "")
-    post_text = template.format(
-        name=flow["file_name"],
-        link=flow["link"],
-        caption=caption_val,
-    ).strip()
+
+    # توضیحاتی که موقع آپلود داده شده (بالا میاد)
+    caption_val = flow.get("caption", "").strip()
+
+    # ساخت متن پست: توضیحات بالا + قالب ثابت پایین
+    footer = template.format(name=flow["file_name"], link=flow["link"]).strip()
+    if caption_val:
+        post_text = f"{caption_val}\n\n{footer}"
+    else:
+        post_text = footer
+
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=flow["link"])]])
     photo_id = flow.get("photo_id")
 
@@ -143,6 +149,36 @@ async def _do_send_post(q_or_msg, context, is_message=False):
         await q_or_msg.reply_text(success_text, parse_mode=ParseMode.MARKDOWN)
     else:
         await q_or_msg.edit_message_text(success_text, parse_mode=ParseMode.MARKDOWN)
+
+    # اگه آپلود گروهی بود، فایل بعدی رو بپرس
+    gflow = context.user_data.get("group_post_flow")
+    if gflow:
+        idx = gflow.get("current_idx", 0) + 1
+        files = gflow.get("files", [])
+        if idx < len(files):
+            gflow["current_idx"] = idx
+            code, name, link = files[idx]
+            context.user_data["post_flow"] = {"bid": gflow["bid"], "code": code, "link": link, "file_name": name}
+            context.user_data["awaiting"] = "post_caption"
+            rows = [[InlineKeyboardButton("⏭ بدون توضیحات", callback_data="post_skip_caption")]]
+            kb_next = InlineKeyboardMarkup(rows)
+            if is_message:
+                await q_or_msg.reply_text(
+                    f"📝 پست {idx+1} از {len(files)}: «{name}»\nتوضیحات رو بنویس (یا رد کن):",
+                    reply_markup=kb_next
+                )
+            else:
+                await q_or_msg.message.reply_text(
+                    f"📝 پست {idx+1} از {len(files)}: «{name}»\nتوضیحات رو بنویس (یا رد کن):",
+                    reply_markup=kb_next
+                )
+        else:
+            context.user_data.pop("group_post_flow", None)
+            done_text = f"🎉 همه {len(files)} پست ارسال شدن!"
+            if is_message:
+                await q_or_msg.reply_text(done_text)
+            else:
+                await q_or_msg.message.reply_text(done_text)
 
 
 # ═══════════════════════════════════════════
@@ -289,19 +325,21 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bid = data[len("mb_ch2_"):]
         bd = db.get("bot_data", {}).get(bid, {})
         ch2 = bd.get("channel2") or "تنظیم نشده"
-        tmpl = bd.get("channel2_template", "{caption}\n\n📁 {name}")
+        tmpl = bd.get("channel2_template", "📁 {name}")
         btn_text = bd.get("channel2_btn_text", "📥 دریافت فایل")
         text = (
             f"📢 تنظیمات کانال پست — {bid}\n\n"
             f"کانال: {ch2}\n"
-            f"قالب پیام:\n{tmpl}\n\n"
+            f"قالب ثابت (footer):\n{tmpl}\n\n"
             f"متن دکمه: {btn_text}\n\n"
-            f"متغیرهای قالب: {{name}}, {{link}}, {{caption}}"
+            f"متغیرهای قالب: {{name}}, {{link}}"
         )
         rows = [
             [InlineKeyboardButton("📢 تغییر کانال", callback_data=f"mb_ch2set_{bid}")],
-            [InlineKeyboardButton("✏️ تغییر قالب پیام", callback_data=f"mb_ch2tmpl_{bid}")],
+            [InlineKeyboardButton("✏️ تغییر قالب ثابت", callback_data=f"mb_ch2tmpl_{bid}")],
             [InlineKeyboardButton("🔘 تغییر متن دکمه", callback_data=f"mb_ch2btn_{bid}")],
+            [InlineKeyboardButton("📨 ارسال پست دستی", callback_data=f"mb_ch2manual_{bid}")],
+            [InlineKeyboardButton("🗑 حذف پست از کانال", callback_data=f"mb_ch2del_{bid}")],
             [InlineKeyboardButton("🔙 برگشت", callback_data=f"mb_view_{bid}")],
         ]
         await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
@@ -337,6 +375,26 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = bd.get("channel2_btn_text", "📥 دریافت فایل")
         await q.edit_message_text(
             f"متن فعلی دکمه: {current}\n\nمتن جدید رو بفرست:",
+            reply_markup=back_kb(f"mb_ch2_{bid}")
+        ); return
+
+    if data.startswith("mb_ch2manual_"):
+        bid = data[len("mb_ch2manual_"):]
+        context.user_data["awaiting"] = "manual_post_link"
+        context.user_data["ch2_bot_id"] = bid
+        await q.edit_message_text(
+            "📨 ارسال پست دستی\n\nلینکی که می‌خوای روی دکمه بذاری رو بفرست:",
+            reply_markup=back_kb(f"mb_ch2_{bid}")
+        ); return
+
+    if data.startswith("mb_ch2del_"):
+        bid = data[len("mb_ch2del_"):]
+        context.user_data["awaiting"] = "del_post_id"
+        context.user_data["ch2_bot_id"] = bid
+        bd = db.get("bot_data", {}).get(bid, {})
+        ch2 = bd.get("channel2") or "تنظیم نشده"
+        await q.edit_message_text(
+            f"🗑 حذف پست از کانال {ch2}\n\nآیدی عددی پست (message_id) رو بفرست:",
             reply_markup=back_kb(f"mb_ch2_{bid}")
         ); return
 
@@ -428,7 +486,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("❌ فایلی پیدا نشد."); return
 
         await q.edit_message_text(f"⏳ در حال آپلود {len(files)} فایل...")
-        codes = []
         target_app = running_bots.get(bid)
         if target_app:
             me = await target_app.bot.get_me()
@@ -439,6 +496,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             me = await tmp.get_me()
             bot_username = me.username
 
+        codes = []
         for f in files:
             try:
                 fwd = await context.bot.forward_message(
@@ -464,10 +522,58 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ {name}\n`{link}`" if code else f"❌ {name}: {link}"
             for code, name, link in codes
         )
+
+        # بررسی کانال دوم
+        db_now = load_db()
+        bd_now = db_now.get("bot_data", {}).get(bid, {})
+        ch2 = bd_now.get("channel2")
+
+        # لینک‌های موفق برای پست گروهی
+        successful = [(code, name, link) for code, name, link in codes if code]
+
+        if ch2 and successful:
+            # ذخیره اطلاعات برای پست گروهی
+            context.user_data["group_post_flow"] = {
+                "bid": bid,
+                "files": successful,
+                "current_idx": 0,
+            }
+            rows = [
+                [InlineKeyboardButton("✅ بله، پست بفرست", callback_data="gpost_yes")],
+                [InlineKeyboardButton("❌ نه، فقط ذخیره", callback_data="gpost_no")],
+            ]
+            await q.edit_message_text(
+                f"📦 {len(successful)} فایل آپلود شد!\n\n{links_text}\n\nپست اطلاع‌رسانی هم بفرستم؟",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(rows)
+            )
+        else:
+            await q.edit_message_text(
+                f"📦 آپلود گروهی تموم شد!\n\n{links_text}",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="mb_back")]])
+            )
+        return
+
+    if data == "gpost_no":
+        context.user_data.pop("group_post_flow", None)
+        await q.edit_message_text("✅ فایل‌ها ذخیره شدن. پست ارسال نشد.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="mb_back")]]))
+        return
+
+    if data == "gpost_yes":
+        gflow = context.user_data.get("group_post_flow", {})
+        files = gflow.get("files", [])
+        if not files:
+            await q.edit_message_text("❌ فایلی پیدا نشد."); return
+        # اولین فایل رو آماده می‌کنیم
+        code, name, link = files[0]
+        context.user_data["post_flow"] = {"bid": gflow["bid"], "code": code, "link": link, "file_name": name}
+        context.user_data["awaiting"] = "post_caption"
+        rows = [[InlineKeyboardButton("⏭ بدون توضیحات", callback_data="post_skip_caption")]]
         await q.edit_message_text(
-            f"📦 آپلود گروهی به ربات «{info['name']}» تموم شد!\n\n{links_text}",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="mb_back")]])
+            f"📝 پست ۱ از {len(files)}: «{name}»\nتوضیحات رو بنویس (یا رد کن):",
+            reply_markup=InlineKeyboardMarkup(rows)
         )
         return
 
@@ -628,6 +734,60 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not awaiting:
         await update.message.reply_text("از /start برای باز کردن پنل استفاده کن.")
+        return
+
+    if awaiting == "manual_post_link":
+        bid = context.user_data.pop("ch2_bot_id", None)
+        context.user_data["awaiting"] = "manual_post_caption"
+        context.user_data["manual_post"] = {"bid": bid, "link": text}
+        await update.message.reply_text(
+            "📝 توضیحات پست رو بنویس (یا «-» بفرست برای بدون توضیحات):"
+        )
+        return
+
+    if awaiting == "manual_post_caption":
+        mp = context.user_data.get("manual_post", {})
+        context.user_data["awaiting"] = "manual_post_btn"
+        mp["caption"] = "" if text == "-" else text
+        await update.message.reply_text(
+            "🔘 متن دکمه رو بنویس (یا «-» برای استفاده از پیش‌فرض):"
+        )
+        return
+
+    if awaiting == "manual_post_btn":
+        mp = context.user_data.pop("manual_post", {})
+        context.user_data.pop("awaiting", None)
+        bid = mp.get("bid")
+        if bid:
+            db2 = load_db()
+            bd2 = db2.get("bot_data", {}).get(bid, {})
+            ch2 = bd2.get("channel2")
+            btn_text = text if text != "-" else bd2.get("channel2_btn_text", "📥 دریافت فایل")
+            caption_val = mp.get("caption", "")
+            footer = bd2.get("channel2_template", "").format(name="", link=mp["link"]).strip()
+            post_text = f"{caption_val}\n\n{footer}".strip() if caption_val else footer or mp["link"]
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=mp["link"])]])
+            try:
+                await context.bot.send_message(chat_id=ch2, text=post_text, reply_markup=kb)
+                await update.message.reply_text("✅ پست دستی ارسال شد.")
+            except TelegramError as e:
+                await update.message.reply_text(f"❌ خطا: {e}")
+        return
+
+    if awaiting == "del_post_id":
+        bid = context.user_data.pop("ch2_bot_id", None)
+        context.user_data.pop("awaiting", None)
+        if text.lstrip("-").isdigit() and bid:
+            db2 = load_db()
+            bd2 = db2.get("bot_data", {}).get(bid, {})
+            ch2 = bd2.get("channel2")
+            try:
+                await context.bot.delete_message(chat_id=ch2, message_id=int(text))
+                await update.message.reply_text("✅ پست حذف شد.")
+            except TelegramError as e:
+                await update.message.reply_text(f"❌ خطا: {e}")
+        else:
+            await update.message.reply_text("❌ آیدی نامعتبره.")
         return
 
     if awaiting == "post_caption":
