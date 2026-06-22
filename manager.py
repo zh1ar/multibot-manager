@@ -79,6 +79,52 @@ async def stop_bot(bot_id: str):
         del running_bots[bot_id]
 
 
+async def _do_send_post(q_or_msg, context, is_message=False):
+    """ارسال پست نهایی به کانال دوم"""
+    flow = context.user_data.pop("post_flow", None)
+    context.user_data.pop("awaiting", None)
+    if not flow:
+        return
+
+    db = load_db()
+    bid = flow["bid"]
+    bd = db.get("bot_data", {}).get(bid, {})
+    ch2 = bd.get("channel2")
+    if not ch2:
+        txt = "❌ کانال پست تنظیم نشده."
+        if is_message:
+            await q_or_msg.reply_text(txt)
+        else:
+            await q_or_msg.edit_message_text(txt)
+        return
+
+    template = bd.get("channel2_template", "{caption}\n\n📁 {name}")
+    btn_text = bd.get("channel2_btn_text", "📥 دریافت فایل")
+    caption_val = flow.get("caption", "")
+    post_text = template.format(
+        name=flow["file_name"],
+        link=flow["link"],
+        caption=caption_val,
+    ).strip()
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=flow["link"])]])
+    photo_id = flow.get("photo_id")
+
+    try:
+        bot = context.bot
+        if photo_id:
+            await bot.send_photo(chat_id=ch2, photo=photo_id, caption=post_text, reply_markup=kb)
+        else:
+            await bot.send_message(chat_id=ch2, text=post_text, reply_markup=kb)
+        success_text = f"✅ پست ارسال شد!\n🔗 لینک:\n`{flow['link']}`"
+    except TelegramError as e:
+        success_text = f"❌ خطا در ارسال پست: {e}"
+
+    if is_message:
+        await q_or_msg.reply_text(success_text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await q_or_msg.edit_message_text(success_text, parse_mode=ParseMode.MARKDOWN)
+
+
 # ═══════════════════════════════════════════
 #   روتر دکمه‌ها
 # ═══════════════════════════════════════════
@@ -119,16 +165,19 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("پیدا نشد.", reply_markup=back_kb("mb_list")); return
         bd = db.get("bot_data", {}).get(bid, {})
         status = "🟢 روشن" if info.get("active") else "🔴 خاموش"
+        ch2 = bd.get("channel2") or "تنظیم نشده"
         text = (
             f"🤖 {info['name']}\n\n"
             f"وضعیت: {status}\n"
             f"کانال ذخیره: {info['channel_id']}\n"
+            f"کانال پست: {ch2}\n"
             f"👥 کاربران: {len(bd.get('users', {}))}\n"
             f"📁 فایل‌ها: {len(bd.get('files', {}))}\n"
         )
         toggle_label = "🔴 خاموش کن" if info.get("active") else "🟢 روشن کن"
         rows = [
             [InlineKeyboardButton(toggle_label, callback_data=f"mb_toggle_{bid}")],
+            [InlineKeyboardButton("📢 تنظیمات کانال پست", callback_data=f"mb_ch2_{bid}")],
             [InlineKeyboardButton("🗑 حذف کامل ربات", callback_data=f"mb_del_{bid}")],
             [InlineKeyboardButton("🔙 برگشت", callback_data="mb_list")],
         ]
@@ -216,6 +265,61 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db2["global_admins"].remove(uid)
         await q.edit_message_text(f"✅ ادمین `{uid}` حذف شد.", parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("mb_admins")); return
 
+    if data.startswith("mb_ch2_"):
+        bid = data[len("mb_ch2_"):]
+        bd = db.get("bot_data", {}).get(bid, {})
+        ch2 = bd.get("channel2") or "تنظیم نشده"
+        tmpl = bd.get("channel2_template", "{caption}\n\n📁 {name}")
+        btn_text = bd.get("channel2_btn_text", "📥 دریافت فایل")
+        text = (
+            f"📢 تنظیمات کانال پست — {bid}\n\n"
+            f"کانال: {ch2}\n"
+            f"قالب پیام:\n{tmpl}\n\n"
+            f"متن دکمه: {btn_text}\n\n"
+            f"متغیرهای قالب: {{name}}, {{link}}, {{caption}}"
+        )
+        rows = [
+            [InlineKeyboardButton("📢 تغییر کانال", callback_data=f"mb_ch2set_{bid}")],
+            [InlineKeyboardButton("✏️ تغییر قالب پیام", callback_data=f"mb_ch2tmpl_{bid}")],
+            [InlineKeyboardButton("🔘 تغییر متن دکمه", callback_data=f"mb_ch2btn_{bid}")],
+            [InlineKeyboardButton("🔙 برگشت", callback_data=f"mb_view_{bid}")],
+        ]
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+
+    if data.startswith("mb_ch2set_"):
+        bid = data[len("mb_ch2set_"):]
+        context.user_data["awaiting"] = "ch2_set"
+        context.user_data["ch2_bot_id"] = bid
+        await q.edit_message_text(
+            "آیدی کانال پست رو بفرست (مثلاً @mychannel یا آیدی عددی):\n\n"
+            "برای حذف کانال پست، عبارت «حذف» رو بفرست.",
+            reply_markup=back_kb(f"mb_ch2_{bid}")
+        ); return
+
+    if data.startswith("mb_ch2tmpl_"):
+        bid = data[len("mb_ch2tmpl_"):]
+        context.user_data["awaiting"] = "ch2_tmpl"
+        context.user_data["ch2_bot_id"] = bid
+        bd = db.get("bot_data", {}).get(bid, {})
+        current = bd.get("channel2_template", "{caption}\n\n📁 {name}")
+        await q.edit_message_text(
+            f"قالب فعلی:\n\n{current}\n\n"
+            "قالب جدید رو بفرست.\n"
+            "متغیرها: {name} (اسم فایل), {link} (لینک دانلود), {caption} (توضیحات)",
+            reply_markup=back_kb(f"mb_ch2_{bid}")
+        ); return
+
+    if data.startswith("mb_ch2btn_"):
+        bid = data[len("mb_ch2btn_"):]
+        context.user_data["awaiting"] = "ch2_btn"
+        context.user_data["ch2_bot_id"] = bid
+        bd = db.get("bot_data", {}).get(bid, {})
+        current = bd.get("channel2_btn_text", "📥 دریافت فایل")
+        await q.edit_message_text(
+            f"متن فعلی دکمه: {current}\n\nمتن جدید رو بفرست:",
+            reply_markup=back_kb(f"mb_ch2_{bid}")
+        ); return
+
     # ─── انتخاب ربات مقصد برای آپلود فایل ───
     if data.startswith("upload_to_"):
         bid = data[len("upload_to_"):]
@@ -225,6 +329,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = db["bots"].get(bid)
         if not info:
             await q.edit_message_text("❌ این ربات پیدا نشد."); return
+
+        # فایل رو توی کانال ذخیره کن
         try:
             fwd = await context.bot.forward_message(
                 chat_id=info["channel_id"],
@@ -241,27 +347,100 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "downloads": 0, "liked_by": [], "disliked_by": [],
                     "custom_caption": pending.get("caption"),
                 }
+
             target_app = running_bots.get(bid)
-            bot_username = None
             if target_app:
                 me = await target_app.bot.get_me()
                 bot_username = me.username
             else:
-                # ربات فعلاً روشن نیست؛ از توکن خودش یوزرنیم بگیر (یه بار)
-                from telegram import Bot
-                tmp_bot = Bot(token=info["token"])
-                me = await tmp_bot.get_me()
+                from telegram import Bot as TGBot
+                tmp = TGBot(token=info["token"])
+                me = await tmp.get_me()
                 bot_username = me.username
 
             link = f"https://t.me/{bot_username}?start=file_{code}"
-            await q.edit_message_text(
-                f"✅ فایل به ربات «{info['name']}» اضافه شد!\n\n🔗 لینک:\n`{link}`",
-                parse_mode=ParseMode.MARKDOWN
-            )
+
+            # بررسی کانال دوم
+            db_now = load_db()
+            bd_now = db_now.get("bot_data", {}).get(bid, {})
+            ch2 = bd_now.get("channel2")
+
+            context.user_data["post_flow"] = {
+                "bid": bid, "code": code, "link": link,
+                "file_name": pending["file_name"],
+            }
+            context.user_data.pop("pending_upload", None)
+
+            if ch2:
+                rows = [
+                    [InlineKeyboardButton("✅ بله، پست بفرست", callback_data="post_yes")],
+                    [InlineKeyboardButton("❌ نه، فقط ذخیره", callback_data="post_no")],
+                ]
+                await q.edit_message_text(
+                    f"✅ فایل ذخیره شد!\n🔗 لینک:\n`{link}`\n\nپست اطلاع‌رسانی هم بفرستم؟",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup(rows)
+                )
+            else:
+                await q.edit_message_text(
+                    f"✅ فایل به ربات «{info['name']}» اضافه شد!\n\n🔗 لینک:\n`{link}`\n\n"
+                    f"💡 کانال پست برای این ربات تنظیم نشده.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                context.user_data.pop("post_flow", None)
+
         except TelegramError as e:
             await q.edit_message_text(f"❌ خطا: {e}\n⚠️ ربات مدیر باید ادمین کانال ذخیره اون ربات باشه.")
-        context.user_data.pop("pending_upload", None)
         return
+
+    if data == "post_no":
+        context.user_data.pop("post_flow", None)
+        await q.edit_message_text("✅ فایل ذخیره شد. پست ارسال نشد.")
+        return
+
+    if data == "post_yes":
+        context.user_data["awaiting"] = "post_caption"
+        rows = [[InlineKeyboardButton("⏭ بدون توضیحات", callback_data="post_skip_caption")]]
+        await q.edit_message_text(
+            "📝 توضیحات پست رو بنویس (یا بدون توضیحات ادامه بده):",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+        return
+
+    if data == "post_skip_caption":
+        context.user_data.pop("awaiting", None)
+        context.user_data.setdefault("post_flow", {})["caption"] = ""
+        rows = [
+            [InlineKeyboardButton("🖼 آره، عکس اضافه می‌کنم", callback_data="post_want_photo")],
+            [InlineKeyboardButton("⏭ بدون عکس، ارسال کن", callback_data="post_send")],
+        ]
+        await q.edit_message_text("🖼 می‌خوای عکس هم اضافه کنی؟", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "post_want_photo":
+        context.user_data["awaiting"] = "post_photo"
+        await q.edit_message_text("🖼 عکس رو بفرست:")
+        return
+
+    if data == "post_send":
+        await _do_send_post(q, context)
+        return
+
+
+async def handle_post_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت عکس برای پست کانال دوم"""
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    if context.user_data.get("awaiting") != "post_photo":
+        return
+    msg = update.message
+    if not msg.photo:
+        await msg.reply_text("❌ لطفاً یه عکس بفرست.")
+        return
+    photo_id = msg.photo[-1].file_id
+    context.user_data.setdefault("post_flow", {})["photo_id"] = photo_id
+    await _do_send_post(msg, context, is_message=True)
 
 
 # ═══════════════════════════════════════════
@@ -320,6 +499,47 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.strip()
+
+    if awaiting == "post_caption":
+        context.user_data.pop("awaiting", None)
+        context.user_data.setdefault("post_flow", {})["caption"] = text
+        rows = [
+            [InlineKeyboardButton("🖼 آره، عکس اضافه می‌کنم", callback_data="post_want_photo")],
+            [InlineKeyboardButton("⏭ بدون عکس، ارسال کن", callback_data="post_send")],
+        ]
+        await update.message.reply_text("🖼 می‌خوای عکس هم اضافه کنی؟", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if awaiting == "ch2_set":
+        bid = context.user_data.pop("ch2_bot_id", None)
+        context.user_data.pop("awaiting", None)
+        if bid:
+            with db_transaction() as db2:
+                bd = db2["bot_data"].setdefault(bid, empty_bot_data())
+                bd["channel2"] = None if text == "حذف" else text
+            msg = "✅ کانال پست حذف شد." if text == "حذف" else f"✅ کانال پست تنظیم شد: {text}"
+            await update.message.reply_text(msg)
+        return
+
+    if awaiting == "ch2_tmpl":
+        bid = context.user_data.pop("ch2_bot_id", None)
+        context.user_data.pop("awaiting", None)
+        if bid:
+            with db_transaction() as db2:
+                bd = db2["bot_data"].setdefault(bid, empty_bot_data())
+                bd["channel2_template"] = text
+            await update.message.reply_text("✅ قالب پیام آپدیت شد.")
+        return
+
+    if awaiting == "ch2_btn":
+        bid = context.user_data.pop("ch2_bot_id", None)
+        context.user_data.pop("awaiting", None)
+        if bid:
+            with db_transaction() as db2:
+                bd = db2["bot_data"].setdefault(bid, empty_bot_data())
+                bd["channel2_btn_text"] = text
+            await update.message.reply_text("✅ متن دکمه آپدیت شد.")
+        return
 
     if awaiting == "add_token":
         context.user_data["new_bot_token"] = text
