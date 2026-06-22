@@ -35,7 +35,11 @@ async def run():
     mgr_app = Application.builder().token(MANAGER_BOT_TOKEN).build()
     mgr_app.add_handler(CommandHandler("start", manager.start))
     mgr_app.add_handler(MessageHandler(
-        filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VOICE,
+        filters.PHOTO & ~filters.COMMAND,
+        manager.handle_post_photo
+    ))
+    mgr_app.add_handler(MessageHandler(
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VOICE,
         manager.handle_file
     ))
     mgr_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manager.handle_text))
