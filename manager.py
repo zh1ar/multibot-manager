@@ -4,7 +4,7 @@ manager.py
 """
 import asyncio
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -17,6 +17,25 @@ from filebot import build_filebot_app
 
 # نگه‌داری Application های در حال اجرای رباتای فایل‌شیر
 running_bots = {}  # {bot_id: Application}
+
+
+BTN_UPLOAD_SINGLE = "📤 آپلود تکی"
+BTN_UPLOAD_GROUP  = "📦 آپلود گروهی"
+BTN_GROUP_FINISH  = "✅ پایان آپلود گروهی"
+
+
+def manager_reply_keyboard():
+    return ReplyKeyboardMarkup(
+        [[BTN_UPLOAD_SINGLE, BTN_UPLOAD_GROUP]],
+        resize_keyboard=True
+    )
+
+
+def manager_group_keyboard():
+    return ReplyKeyboardMarkup(
+        [[BTN_GROUP_FINISH]],
+        resize_keyboard=True
+    )
 
 
 def is_admin(user_id):
@@ -33,8 +52,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         f"👋 سلام {user.first_name}!\n🔧 ربات مدیر در خدمتته.",
-        reply_markup=main_menu()
+        reply_markup=manager_reply_keyboard()
     )
+    await update.message.reply_text("🔧 پنل مدیریت", reply_markup=main_menu())
 
 
 def main_menu():
@@ -398,6 +418,59 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ فایل ذخیره شد. پست ارسال نشد.")
         return
 
+    if data.startswith("group_to_"):
+        bid = data[len("group_to_"):]
+        info = db["bots"].get(bid)
+        if not info:
+            await q.edit_message_text("❌ ربات پیدا نشد."); return
+        files = context.user_data.pop("group_files", [])
+        if not files:
+            await q.edit_message_text("❌ فایلی پیدا نشد."); return
+
+        await q.edit_message_text(f"⏳ در حال آپلود {len(files)} فایل...")
+        codes = []
+        target_app = running_bots.get(bid)
+        if target_app:
+            me = await target_app.bot.get_me()
+            bot_username = me.username
+        else:
+            from telegram import Bot as TGBot
+            tmp = TGBot(token=info["token"])
+            me = await tmp.get_me()
+            bot_username = me.username
+
+        for f in files:
+            try:
+                fwd = await context.bot.forward_message(
+                    chat_id=info["channel_id"],
+                    from_chat_id=f["chat_id"],
+                    message_id=f["message_id"],
+                )
+                code = f"{f['file_id'][-8:]}{fwd.message_id}"
+                with db_transaction() as db2:
+                    bd = db2["bot_data"].setdefault(bid, empty_bot_data())
+                    bd.setdefault("files", {})[code] = {
+                        "code": code, "name": f["file_name"], "type": f["file_type"],
+                        "message_id": fwd.message_id, "uploaded_by": q.from_user.id,
+                        "uploaded_at": datetime.now().isoformat(),
+                        "downloads": 0, "liked_by": [], "disliked_by": [],
+                        "custom_caption": f.get("caption"),
+                    }
+                codes.append((code, f["file_name"], f"https://t.me/{bot_username}?start=file_{code}"))
+            except TelegramError as e:
+                codes.append((None, f["file_name"], f"خطا: {e}"))
+
+        links_text = "\n".join(
+            f"✅ {name}\n`{link}`" if code else f"❌ {name}: {link}"
+            for code, name, link in codes
+        )
+        await q.edit_message_text(
+            f"📦 آپلود گروهی به ربات «{info['name']}» تموم شد!\n\n{links_text}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="mb_back")]])
+        )
+        return
+
     if data == "post_yes":
         context.user_data["awaiting"] = "post_caption"
         rows = [[InlineKeyboardButton("⏭ بدون توضیحات", callback_data="post_skip_caption")]]
@@ -427,20 +500,40 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+async def _finish_group_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پایان آپلود گروهی - نمایش لیست ربات‌ها برای انتخاب مقصد"""
+    files = context.user_data.get("group_files", [])
+    if not files:
+        await update.message.reply_text("هنوز فایلی نفرستادی.", reply_markup=manager_group_keyboard())
+        return
+    db = load_db()
+    active_bots = {bid: info for bid, info in db.get("bots", {}).items() if info.get("active")}
+    if not active_bots:
+        await update.message.reply_text("❌ هیچ ربات فعالی وجود نداره.")
+        return
+    context.user_data["upload_mode"] = "single"
+    rows = [[InlineKeyboardButton(info["name"], callback_data=f"group_to_{bid}")] for bid, info in active_bots.items()]
+    await update.message.reply_text(
+        f"📦 {len(files)} فایل آماده‌ست. کدوم ربات؟",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+
 async def handle_post_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت عکس برای پست کانال دوم"""
+    """دریافت عکس - اگه توی فلوی پست بودیم عکس پست رو می‌گیره، وگرنه آپلود معمولیه"""
     user = update.effective_user
     if not is_admin(user.id):
         return
-    if context.user_data.get("awaiting") != "post_photo":
-        return
-    msg = update.message
-    if not msg.photo:
-        await msg.reply_text("❌ لطفاً یه عکس بفرست.")
-        return
-    photo_id = msg.photo[-1].file_id
-    context.user_data.setdefault("post_flow", {})["photo_id"] = photo_id
-    await _do_send_post(msg, context, is_message=True)
+    if context.user_data.get("awaiting") == "post_photo":
+        msg = update.message
+        if not msg.photo:
+            await msg.reply_text("❌ لطفاً یه عکس بفرست.")
+            return
+        photo_id = msg.photo[-1].file_id
+        context.user_data.setdefault("post_flow", {})["photo_id"] = photo_id
+        await _do_send_post(msg, context, is_message=True)
+    else:
+        await handle_file(update, context)
 
 
 # ═══════════════════════════════════════════
@@ -470,11 +563,27 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not file_id:
         await msg.reply_text("❌ نوع فایل پشتیبانی نمی‌شه."); return
 
+    mode = context.user_data.get("upload_mode", "single")
+
+    if mode == "group":
+        # توی حالت گروهی فقط اطلاعات فایل رو نگه می‌داریم
+        context.user_data.setdefault("group_files", []).append({
+            "chat_id": msg.chat_id,
+            "message_id": msg.message_id,
+            "file_id": file_id,
+            "file_name": file_name,
+            "file_type": file_type,
+            "caption": msg.caption,
+        })
+        count = len(context.user_data["group_files"])
+        await msg.reply_text(f"➕ اضافه شد ({count} فایل تا الان).")
+        return
+
+    # حالت تکی
     db = load_db()
     active_bots = {bid: info for bid, info in db.get("bots", {}).items() if info.get("active")}
     if not active_bots:
-        await msg.reply_text("❌ هیچ ربات فعالی برای آپلود وجود نداره. اول یه ربات اضافه کن.")
-        return
+        await msg.reply_text("❌ هیچ ربات فعالی برای آپلود وجود نداره."); return
 
     context.user_data["pending_upload"] = {
         "chat_id": msg.chat_id, "message_id": msg.message_id,
@@ -499,6 +608,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.strip()
+
+    # ─── دکمه‌های کیبورد آپلود ───
+    if text == BTN_UPLOAD_SINGLE:
+        context.user_data["upload_mode"] = "single"
+        context.user_data.pop("group_files", None)
+        await update.message.reply_text("📤 حالت آپلود تکی فعاله. فایل رو بفرست.", reply_markup=manager_reply_keyboard())
+        return
+
+    if text == BTN_UPLOAD_GROUP:
+        context.user_data["upload_mode"] = "group"
+        context.user_data["group_files"] = []
+        await update.message.reply_text(
+            "📦 حالت آپلود گروهی فعاله.\nفایل‌ها رو بفرست، آخرش «✅ پایان آپلود گروهی» رو بزن.",
+            reply_markup=manager_group_keyboard()
+        )
+        return
+
+    if text == BTN_GROUP_FINISH:
+        await _finish_group_upload(update, context)
+        return
 
     if awaiting == "post_caption":
         context.user_data.pop("awaiting", None)
