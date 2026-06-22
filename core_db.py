@@ -104,6 +104,12 @@ def empty_bot_data():
     return {
         "users": {}, "files": {}, "banned": [], "texts": {},
         "join_channels": [], "required_task": None, "packs": {},
+        # کانال دوم برای ارسال پست اطلاع‌رسانی (اختیاری)
+        "channel2": None,
+        # قالب پست کانال دوم - متغیرها: {name}, {link}, {caption}
+        "channel2_template": "{caption}\n\n📁 {name}",
+        # متن دکمه‌ی شیشه‌ای
+        "channel2_btn_text": "📥 دریافت فایل",
     }
 
 
