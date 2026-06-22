@@ -150,36 +150,6 @@ async def _do_send_post(q_or_msg, context, is_message=False):
     else:
         await q_or_msg.edit_message_text(success_text, parse_mode=ParseMode.MARKDOWN)
 
-    # اگه آپلود گروهی بود، فایل بعدی رو بپرس
-    gflow = context.user_data.get("group_post_flow")
-    if gflow:
-        idx = gflow.get("current_idx", 0) + 1
-        files = gflow.get("files", [])
-        if idx < len(files):
-            gflow["current_idx"] = idx
-            code, name, link = files[idx]
-            context.user_data["post_flow"] = {"bid": gflow["bid"], "code": code, "link": link, "file_name": name}
-            context.user_data["awaiting"] = "post_caption"
-            rows = [[InlineKeyboardButton("⏭ بدون توضیحات", callback_data="post_skip_caption")]]
-            kb_next = InlineKeyboardMarkup(rows)
-            if is_message:
-                await q_or_msg.reply_text(
-                    f"📝 پست {idx+1} از {len(files)}: «{name}»\nتوضیحات رو بنویس (یا رد کن):",
-                    reply_markup=kb_next
-                )
-            else:
-                await q_or_msg.message.reply_text(
-                    f"📝 پست {idx+1} از {len(files)}: «{name}»\nتوضیحات رو بنویس (یا رد کن):",
-                    reply_markup=kb_next
-                )
-        else:
-            context.user_data.pop("group_post_flow", None)
-            done_text = f"🎉 همه {len(files)} پست ارسال شدن!"
-            if is_message:
-                await q_or_msg.reply_text(done_text)
-            else:
-                await q_or_msg.message.reply_text(done_text)
-
 
 # ═══════════════════════════════════════════
 #   روتر دکمه‌ها
@@ -496,6 +466,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             me = await tmp.get_me()
             bot_username = me.username
 
+        # اول همه فایل‌ها رو آپلود کن و کدشون رو بگیر
         codes = []
         for f in files:
             try:
@@ -514,67 +485,56 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "downloads": 0, "liked_by": [], "disliked_by": [],
                         "custom_caption": f.get("caption"),
                     }
-                codes.append((code, f["file_name"], f"https://t.me/{bot_username}?start=file_{code}"))
+                codes.append(code)
             except TelegramError as e:
-                codes.append((None, f["file_name"], f"خطا: {e}"))
+                pass  # فایل‌های ناموفق رو نادیده می‌گیریم
 
-        links_text = "\n".join(
-            f"✅ {name}\n`{link}`" if code else f"❌ {name}: {link}"
-            for code, name, link in codes
-        )
+        if not codes:
+            await q.edit_message_text("❌ هیچ فایلی آپلود نشد.")
+            return
+
+        # یه پک از همه فایل‌ها بساز
+        pack_code = f"pack{codes[0][:6]}{len(codes)}{int(datetime.now().timestamp())%100000}"
+        with db_transaction() as db2:
+            bd = db2["bot_data"].setdefault(bid, empty_bot_data())
+            bd.setdefault("packs", {})[pack_code] = {
+                "code": pack_code, "files": codes,
+                "uploaded_by": q.from_user.id,
+                "uploaded_at": datetime.now().isoformat(),
+                "downloads": 0,
+            }
+
+        pack_link = f"https://t.me/{bot_username}?start=pack_{pack_code}"
 
         # بررسی کانال دوم
         db_now = load_db()
         bd_now = db_now.get("bot_data", {}).get(bid, {})
         ch2 = bd_now.get("channel2")
 
-        # لینک‌های موفق برای پست گروهی
-        successful = [(code, name, link) for code, name, link in codes if code]
+        context.user_data["post_flow"] = {
+            "bid": bid,
+            "code": pack_code,
+            "link": pack_link,
+            "file_name": f"پک {len(codes)} فایل",
+        }
 
-        if ch2 and successful:
-            # ذخیره اطلاعات برای پست گروهی
-            context.user_data["group_post_flow"] = {
-                "bid": bid,
-                "files": successful,
-                "current_idx": 0,
-            }
+        if ch2:
             rows = [
-                [InlineKeyboardButton("✅ بله، پست بفرست", callback_data="gpost_yes")],
-                [InlineKeyboardButton("❌ نه، فقط ذخیره", callback_data="gpost_no")],
+                [InlineKeyboardButton("✅ بله، پست بفرست", callback_data="post_yes")],
+                [InlineKeyboardButton("❌ نه، فقط ذخیره", callback_data="post_no")],
             ]
             await q.edit_message_text(
-                f"📦 {len(successful)} فایل آپلود شد!\n\n{links_text}\n\nپست اطلاع‌رسانی هم بفرستم؟",
+                f"📦 پک {len(codes)} فایل ساخته شد!\n\n🔗 لینک پک:\n`{pack_link}`\n\nپست اطلاع‌رسانی هم بفرستم؟",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup(rows)
             )
         else:
             await q.edit_message_text(
-                f"📦 آپلود گروهی تموم شد!\n\n{links_text}",
+                f"📦 پک {len(codes)} فایل ساخته شد!\n\n🔗 لینک پک:\n`{pack_link}`",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="mb_back")]])
             )
-        return
-
-    if data == "gpost_no":
-        context.user_data.pop("group_post_flow", None)
-        await q.edit_message_text("✅ فایل‌ها ذخیره شدن. پست ارسال نشد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="mb_back")]]))
-        return
-
-    if data == "gpost_yes":
-        gflow = context.user_data.get("group_post_flow", {})
-        files = gflow.get("files", [])
-        if not files:
-            await q.edit_message_text("❌ فایلی پیدا نشد."); return
-        # اولین فایل رو آماده می‌کنیم
-        code, name, link = files[0]
-        context.user_data["post_flow"] = {"bid": gflow["bid"], "code": code, "link": link, "file_name": name}
-        context.user_data["awaiting"] = "post_caption"
-        rows = [[InlineKeyboardButton("⏭ بدون توضیحات", callback_data="post_skip_caption")]]
-        await q.edit_message_text(
-            f"📝 پست ۱ از {len(files)}: «{name}»\nتوضیحات رو بنویس (یا رد کن):",
-            reply_markup=InlineKeyboardMarkup(rows)
-        )
+            context.user_data.pop("post_flow", None)
         return
 
     if data == "post_yes":
