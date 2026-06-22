@@ -602,14 +602,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.id):
         await update.message.reply_text("⛔️ دسترسی نداری.")
         return
-    awaiting = context.user_data.get("awaiting")
-    if not awaiting:
-        await update.message.reply_text("از /start برای باز کردن پنل استفاده کن.")
-        return
 
     text = update.message.text.strip()
+    awaiting = context.user_data.get("awaiting")
 
-    # ─── دکمه‌های کیبورد آپلود ───
+    # ─── دکمه‌های کیبورد آپلود (باید قبل از هر چک دیگه‌ای بیان) ───
     if text == BTN_UPLOAD_SINGLE:
         context.user_data["upload_mode"] = "single"
         context.user_data.pop("group_files", None)
@@ -627,6 +624,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == BTN_GROUP_FINISH:
         await _finish_group_upload(update, context)
+        return
+
+    if not awaiting:
+        await update.message.reply_text("از /start برای باز کردن پنل استفاده کن.")
         return
 
     if awaiting == "post_caption":
