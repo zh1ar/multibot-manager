@@ -292,6 +292,27 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db2["global_admins"].remove(uid)
         await q.edit_message_text(f"✅ ادمین `{uid}` حذف شد.", parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("mb_admins")); return
 
+    if data.startswith("mb_autodel_set_"):
+        parts = data[len("mb_autodel_set_"):].rsplit("_", 1)
+        bid, seconds = parts[0], int(parts[1])
+        with db_transaction() as db2:
+            db2["bot_data"].setdefault(bid, {})["auto_delete_seconds"] = seconds
+        label = "غیرفعال شد" if seconds == 0 else (
+            f"{seconds} ثانیه" if seconds < 60 else
+            f"{seconds // 60} دقیقه" if seconds < 3600 else
+            f"{seconds // 3600} ساعت"
+        )
+        await q.edit_message_text(f"✅ تایمر تنظیم شد: {label}", reply_markup=back_kb(f"mb_autodel_{bid}")); return
+
+    if data.startswith("mb_autodel_custom_"):
+        bid = data[len("mb_autodel_custom_"):]
+        context.user_data["awaiting"] = "autodel_custom"
+        context.user_data["ch2_bot_id"] = bid
+        await q.edit_message_text(
+            "⏱ مدت زمان رو به ثانیه بنویس (مثلاً 120 برای ۲ دقیقه):",
+            reply_markup=back_kb(f"mb_autodel_{bid}")
+        ); return
+
     if data.startswith("mb_autodel_"):
         bid = data[len("mb_autodel_"):]
         bd = db.get("bot_data", {}).get(bid, {})
@@ -315,48 +336,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏱ تایمر حذف خودکار\n\nوضعیت فعلی: {current_text}\n\nبعد از ارسال فایل به کاربر، پیام بعد از این مدت حذف می‌شه:",
             reply_markup=InlineKeyboardMarkup(rows)
         ); return
-
-    if data.startswith("mb_autodel_set_"):
-        parts = data[len("mb_autodel_set_"):].rsplit("_", 1)
-        bid, seconds = parts[0], int(parts[1])
-        with db_transaction() as db2:
-            db2["bot_data"].setdefault(bid, {})["auto_delete_seconds"] = seconds
-        label = "غیرفعال شد" if seconds == 0 else (
-            f"{seconds} ثانیه" if seconds < 60 else
-            f"{seconds // 60} دقیقه" if seconds < 3600 else
-            f"{seconds // 3600} ساعت"
-        )
-        await q.edit_message_text(f"✅ تایمر تنظیم شد: {label}", reply_markup=back_kb(f"mb_autodel_{bid}")); return
-
-    if data.startswith("mb_autodel_custom_"):
-        bid = data[len("mb_autodel_custom_"):]
-        context.user_data["awaiting"] = "autodel_custom"
-        context.user_data["ch2_bot_id"] = bid
-        await q.edit_message_text(
-            "⏱ مدت زمان رو به ثانیه بنویس (مثلاً 120 برای ۲ دقیقه):",
-            reply_markup=back_kb(f"mb_autodel_{bid}")
-        ); return
-        bid = data[len("mb_ch2_"):]
-        bd = db.get("bot_data", {}).get(bid, {})
-        ch2 = bd.get("channel2") or "تنظیم نشده"
-        tmpl = bd.get("channel2_template", "📁 {name}")
-        btn_text = bd.get("channel2_btn_text", "📥 دریافت فایل")
-        text = (
-            f"📢 تنظیمات کانال پست — {bid}\n\n"
-            f"کانال: {ch2}\n"
-            f"قالب ثابت (footer):\n{tmpl}\n\n"
-            f"متن دکمه: {btn_text}\n\n"
-            f"متغیرهای قالب: {{name}}, {{link}}"
-        )
-        rows = [
-            [InlineKeyboardButton("📢 تغییر کانال", callback_data=f"mb_ch2set_{bid}")],
-            [InlineKeyboardButton("✏️ تغییر قالب ثابت", callback_data=f"mb_ch2tmpl_{bid}")],
-            [InlineKeyboardButton("🔘 تغییر متن دکمه", callback_data=f"mb_ch2btn_{bid}")],
-            [InlineKeyboardButton("📨 ارسال پست دستی", callback_data=f"mb_ch2manual_{bid}")],
-            [InlineKeyboardButton("🗑 حذف پست از کانال", callback_data=f"mb_ch2del_{bid}")],
-            [InlineKeyboardButton("🔙 برگشت", callback_data=f"mb_view_{bid}")],
-        ]
-        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
 
     if data.startswith("mb_ch2set_"):
         bid = data[len("mb_ch2set_"):]
