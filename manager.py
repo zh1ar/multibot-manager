@@ -204,6 +204,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = [
             [InlineKeyboardButton(toggle_label, callback_data=f"mb_toggle_{bid}")],
             [InlineKeyboardButton("📢 تنظیمات کانال پست", callback_data=f"mb_ch2_{bid}")],
+            [InlineKeyboardButton("⏱ تایمر حذف خودکار", callback_data=f"mb_autodel_{bid}")],
             [InlineKeyboardButton("🗑 حذف کامل ربات", callback_data=f"mb_del_{bid}")],
             [InlineKeyboardButton("🔙 برگشت", callback_data="mb_list")],
         ]
@@ -291,7 +292,50 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db2["global_admins"].remove(uid)
         await q.edit_message_text(f"✅ ادمین `{uid}` حذف شد.", parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("mb_admins")); return
 
-    if data.startswith("mb_ch2_"):
+    if data.startswith("mb_autodel_"):
+        bid = data[len("mb_autodel_"):]
+        bd = db.get("bot_data", {}).get(bid, {})
+        current = bd.get("auto_delete_seconds", 0)
+        current_text = "غیرفعال" if not current else (
+            f"{current} ثانیه" if current < 60 else
+            f"{current // 60} دقیقه" if current < 3600 else
+            f"{current // 3600} ساعت"
+        )
+        rows = [
+            [InlineKeyboardButton("❌ غیرفعال", callback_data=f"mb_autodel_set_{bid}_0")],
+            [InlineKeyboardButton("30 ثانیه", callback_data=f"mb_autodel_set_{bid}_30"),
+             InlineKeyboardButton("1 دقیقه", callback_data=f"mb_autodel_set_{bid}_60")],
+            [InlineKeyboardButton("5 دقیقه", callback_data=f"mb_autodel_set_{bid}_300"),
+             InlineKeyboardButton("30 دقیقه", callback_data=f"mb_autodel_set_{bid}_1800")],
+            [InlineKeyboardButton("1 ساعت", callback_data=f"mb_autodel_set_{bid}_3600"),
+             InlineKeyboardButton("✏️ دستی", callback_data=f"mb_autodel_custom_{bid}")],
+            [InlineKeyboardButton("🔙 برگشت", callback_data=f"mb_view_{bid}")],
+        ]
+        await q.edit_message_text(
+            f"⏱ تایمر حذف خودکار\n\nوضعیت فعلی: {current_text}\n\nبعد از ارسال فایل به کاربر، پیام بعد از این مدت حذف می‌شه:",
+            reply_markup=InlineKeyboardMarkup(rows)
+        ); return
+
+    if data.startswith("mb_autodel_set_"):
+        parts = data[len("mb_autodel_set_"):].rsplit("_", 1)
+        bid, seconds = parts[0], int(parts[1])
+        with db_transaction() as db2:
+            db2["bot_data"].setdefault(bid, {})["auto_delete_seconds"] = seconds
+        label = "غیرفعال شد" if seconds == 0 else (
+            f"{seconds} ثانیه" if seconds < 60 else
+            f"{seconds // 60} دقیقه" if seconds < 3600 else
+            f"{seconds // 3600} ساعت"
+        )
+        await q.edit_message_text(f"✅ تایمر تنظیم شد: {label}", reply_markup=back_kb(f"mb_autodel_{bid}")); return
+
+    if data.startswith("mb_autodel_custom_"):
+        bid = data[len("mb_autodel_custom_"):]
+        context.user_data["awaiting"] = "autodel_custom"
+        context.user_data["ch2_bot_id"] = bid
+        await q.edit_message_text(
+            "⏱ مدت زمان رو به ثانیه بنویس (مثلاً 120 برای ۲ دقیقه):",
+            reply_markup=back_kb(f"mb_autodel_{bid}")
+        ); return
         bid = data[len("mb_ch2_"):]
         bd = db.get("bot_data", {}).get(bid, {})
         ch2 = bd.get("channel2") or "تنظیم نشده"
@@ -694,6 +738,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not awaiting:
         await update.message.reply_text("از /start برای باز کردن پنل استفاده کن.")
+        return
+
+    if awaiting == "autodel_custom":
+        bid = context.user_data.pop("ch2_bot_id", None)
+        context.user_data.pop("awaiting", None)
+        if bid and text.isdigit():
+            seconds = int(text)
+            with db_transaction() as db2:
+                db2["bot_data"].setdefault(bid, {})["auto_delete_seconds"] = seconds
+            label = f"{seconds} ثانیه" if seconds < 60 else f"{seconds // 60} دقیقه" if seconds < 3600 else f"{seconds // 3600} ساعت"
+            await update.message.reply_text(f"✅ تایمر تنظیم شد: {label}")
+        else:
+            await update.message.reply_text("❌ فقط عدد وارد کن (به ثانیه).")
         return
 
     if awaiting == "manual_post_link":

@@ -197,6 +197,18 @@ def build_filebot_app(bot_id: str, token: str, channel_id: str):
             return
         info = bd["files"][file_code]
         caption = info.get("custom_caption") or get_text("file_caption", name=info.get("name", ""))
+
+        # تایمر حذف خودکار
+        auto_del = bd.get("auto_delete_seconds", 0)
+        if auto_del and auto_del > 0:
+            if auto_del < 60:
+                timer_text = f"{auto_del} ثانیه"
+            elif auto_del < 3600:
+                timer_text = f"{auto_del // 60} دقیقه"
+            else:
+                timer_text = f"{auto_del // 3600} ساعت"
+            caption = f"⚠️ این پیام {timer_text} دیگه حذف می‌شه، سیو کنید!\n\n{caption}"
+
         kb = file_reaction_keyboard(file_code, len(info.get("liked_by", [])), len(info.get("disliked_by", [])))
         try:
             sent = await context.bot.copy_message(
@@ -210,6 +222,17 @@ def build_filebot_app(bot_id: str, token: str, channel_id: str):
             extra = get_text("file_sent_extra")
             if extra:
                 await context.bot.send_message(chat_id=chat_id, text=extra)
+
+            # تایمر حذف
+            if auto_del and auto_del > 0:
+                async def _delete_later(msg_id, cid, delay):
+                    await asyncio.sleep(delay)
+                    try:
+                        await context.bot.delete_message(chat_id=cid, message_id=msg_id)
+                    except TelegramError:
+                        pass
+                asyncio.create_task(_delete_later(sent.message_id, chat_id, auto_del))
+
             return sent
         except TelegramError as e:
             await context.bot.send_message(chat_id=chat_id, text=f"❌ خطا در ارسال فایل: {e}")
@@ -220,14 +243,43 @@ def build_filebot_app(bot_id: str, token: str, channel_id: str):
             await context.bot.send_message(chat_id=chat_id, text=get_text("file_not_found"))
             return
         pack = bd["packs"][pack_code]
-        await context.bot.send_message(chat_id=chat_id, text=f"📦 ارسال پک ({len(pack['files'])} فایل)...")
+        auto_del = bd.get("auto_delete_seconds", 0)
+
+        if auto_del and auto_del > 0:
+            if auto_del < 60:
+                timer_text = f"{auto_del} ثانیه"
+            elif auto_del < 3600:
+                timer_text = f"{auto_del // 60} دقیقه"
+            else:
+                timer_text = f"{auto_del // 3600} ساعت"
+            warn_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ این پیام‌ها {timer_text} دیگه حذف می‌شن، سیو کنید!\n\n📦 ارسال پک ({len(pack['files'])} فایل)..."
+            )
+        else:
+            warn_msg = await context.bot.send_message(chat_id=chat_id, text=f"📦 ارسال پک ({len(pack['files'])} فایل)...")
+
+        sent_ids = [warn_msg.message_id]
         for code in pack["files"]:
-            await deliver_file(update_or_query, context, code, chat_id)
+            sent = await deliver_file(update_or_query, context, code, chat_id)
+            if sent:
+                sent_ids.append(sent.message_id)
             await asyncio.sleep(0.3)
+
         with db_transaction() as db:
             bdt = db["bot_data"].get(bot_id, {})
             if pack_code in bdt.get("packs", {}):
                 bdt["packs"][pack_code]["downloads"] = bdt["packs"][pack_code].get("downloads", 0) + 1
+
+        if auto_del and auto_del > 0:
+            async def _delete_pack_later(msg_ids, cid, delay):
+                await asyncio.sleep(delay)
+                for mid in msg_ids:
+                    try:
+                        await context.bot.delete_message(chat_id=cid, message_id=mid)
+                    except TelegramError:
+                        pass
+            asyncio.create_task(_delete_pack_later(sent_ids, chat_id, auto_del))
 
     # ─── جریان گیت‌ها: بن → عضویت → وظیفه → ارسال ───
     async def try_deliver_with_gates(update: Update, context: ContextTypes.DEFAULT_TYPE, file_code, is_pack=False):

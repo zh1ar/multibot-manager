@@ -106,10 +106,12 @@ def empty_bot_data():
         "join_channels": [], "required_task": None, "packs": {},
         # کانال دوم برای ارسال پست اطلاع‌رسانی (اختیاری)
         "channel2": None,
-        # قالب پست کانال دوم - متغیرها: {name}, {link}, {caption}
-        "channel2_template": "{caption}\n\n📁 {name}",
+        # قالب ثابت (footer) پست کانال دوم - متغیرها: {name}, {link}
+        "channel2_template": "📁 {name}",
         # متن دکمه‌ی شیشه‌ای
         "channel2_btn_text": "📥 دریافت فایل",
+        # تایمر حذف خودکار پیام فایل (ثانیه، 0 = غیرفعال)
+        "auto_delete_seconds": 0,
     }
 
 
